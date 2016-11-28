@@ -15,7 +15,6 @@
 package gitindex
 
 import (
-	"fmt"
 	"log"
 	"net/url"
 	"os"
@@ -121,31 +120,14 @@ func RepoURL(repoDir string) (*url.URL, error) {
 
 // Templates fills in URL templates for known git hosting sites.
 func Templates(u *url.URL) (*zoekt.Repository, error) {
-	if strings.HasSuffix(u.Host, "googlesource.com") {
-		/// eg. https://gerrit.googlesource.com/gitiles/+/master/tools/run_dev.sh#20
-		return &zoekt.Repository{
-			Name:                 filepath.Join(u.Host, u.Path),
-			URL:                  u.String(),
-			CommitURLTemplate:    u.String() + "/+/{{.Version}}",
-			FileURLTemplate:      u.String() + "/+/{{.Version}}/{{.Path}}",
-			LineFragmentTemplate: "{{.LineNumber}}",
-		}, nil
-	} else if u.Host == "github.com" {
-		t := *u
-		// CloneURL from the JSON API has .git
-		t.Path = strings.TrimSuffix(t.Path, ".git")
-
-		// eg. https://github.com/hanwen/go-fuse/blob/notify/genversion.sh#L10
-		return &zoekt.Repository{
-			Name:                 filepath.Join(t.Host, t.Path),
-			URL:                  t.String(),
-			CommitURLTemplate:    t.String() + "/commit/{{.Version}}",
-			FileURLTemplate:      t.String() + "/blob/{{.Version}}/{{.Path}}",
-			LineFragmentTemplate: "L{{.LineNumber}}",
-		}, nil
-	}
-
-	return nil, fmt.Errorf("scheme unknown for URL %s", u)
+	/// eg. https://gerrit.googlesource.com/gitiles/+/master/tools/run_dev.sh#20
+	return &zoekt.Repository{
+		Name:                 filepath.Join(u.Host, u.Path),
+		URL:                  u.String(),
+		CommitURLTemplate:    u.String() + "/+/{{.Version}}",
+		FileURLTemplate:      u.String() + "/+/{{.Version}}/{{.Path}}",
+		LineFragmentTemplate: "{{.LineNumber}}",
+	}, nil
 }
 
 // getCommit returns a tree object for the given reference.
