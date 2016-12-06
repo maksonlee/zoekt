@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/libgit2/git2go"
+	"net"
 )
 
 type RepoCache struct {
@@ -46,7 +47,8 @@ func (rc *RepoCache) Close() {
 }
 
 func repoKey(u *url.URL) string {
-	key := filepath.Join(u.Host, u.Path)
+	host, _, _ := net.SplitHostPort(u.Host)
+	key := filepath.Join(host, u.Path)
 	if !strings.HasSuffix(key, ".git") {
 		key += ".git"
 	}
