@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"log"
 	"regexp"
-	"strings"
 
 	"github.com/google/zoekt/query"
 )
@@ -35,15 +34,17 @@ type indexData struct {
 
 	newlinesIndex    []uint32
 	docSectionsIndex []uint32
+	runeOffsets      []uint32
 
 	// offsets of file contents. Includes end of last file.
 	boundaries []uint32
 
 	fileEnds []uint32
 
-	fileNameContent []byte
-	fileNameIndex   []uint32
-	fileNameNgrams  map[ngram][]uint32
+	fileNameContent     []byte
+	fileNameIndex       []uint32
+	fileNameNgrams      map[ngram][]uint32
+	fileNameRuneOffsets []uint32
 
 	fileBranchMasks []uint32
 
@@ -71,6 +72,7 @@ func (d *indexData) memoryUse() int {
 	for _, a := range [][]uint32{
 		d.newlinesIndex, d.docSectionsIndex,
 		d.fileEnds, d.fileNameIndex, d.fileBranchMasks,
+		d.runeOffsets, d.fileNameRuneOffsets,
 	} {
 		sz += 4 * len(a)
 	}
@@ -185,22 +187,6 @@ func (data *indexData) getBruteForceFileNameDocIterator(query *query.Substring) 
 	return &bruteForceIter{cands}
 }
 
-func (data *indexData) getFileNameDocIterator(query *query.Substring) docIterator {
-	if len(query.Pattern) < ngramSize {
-		return data.getBruteForceFileNameDocIterator(query)
-	}
-	str := strings.ToLower(query.Pattern) // TODO - UTF-8
-	di := &ngramDocIterator{
-		query:    query,
-		distance: uint32(len(str)) - ngramSize,
-		ends:     data.fileNameIndex[1:],
-		first:    data.fileNameNgrams[stringToNGram(str[:ngramSize])],
-		last:     data.fileNameNgrams[stringToNGram(str[len(str)-ngramSize:])],
-	}
-
-	return di
-}
-
 const maxUInt32 = 0xffffffff
 
 func minarg(xs []uint32) uint32 {
@@ -213,47 +199,6 @@ func minarg(xs []uint32) uint32 {
 		}
 	}
 	return uint32(j)
-}
-
-func hasCase(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-func flipCase(c byte) byte {
-	if c >= 'A' && c <= 'Z' {
-		return c - 'A' + 'a'
-	}
-	if c >= 'a' && c <= 'z' {
-		return c - 'a' + 'A'
-	}
-	return c
-}
-
-func generateCaseNgrams(g ngram) []ngram {
-	asBytes := ngramToBytes(g)
-
-	variants := make([]ngram, 0, 8)
-	seen := map[ngram]struct{}{}
-	for i := 0; i < (1 << ngramSize); i++ {
-		var variant [ngramSize]byte
-		for j := 0; j < ngramSize; j++ {
-			c := asBytes[j]
-			if i&(1<<uint(j)) != 0 {
-				if hasCase(c) {
-					c = flipCase(c)
-				}
-			}
-			variant[j] = c
-		}
-
-		next := bytesToNGram(variant[:])
-		if _, ok := seen[next]; !ok {
-			variants = append(variants, next)
-			seen[next] = struct{}{}
-		}
-	}
-
-	return variants
 }
 
 func (data *indexData) ngramFrequency(ng ngram, filename bool) uint32 {

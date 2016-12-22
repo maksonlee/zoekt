@@ -30,33 +30,69 @@ const ngramSize = 3
 type searchableString struct {
 	// lower cased data.
 	data []byte
-
-	// offset of the content
-	offset uint32
 }
 
-func (e *searchableString) end() uint32 {
-	return e.offset + uint32(len(e.data))
+// Store character (unicode codepoint) offset (in bytes) this often.
+const runeOffsetFrequency = 100
+
+type postingsBuilder struct {
+	postings    map[ngram][]byte
+	lastOffsets map[ngram]uint32
+
+	// To support UTF-8 searching, we must map back runes to byte
+	// offsets. As a first attempt, we sample regularly. The
+	// precise offset can be found by walking from the recorded
+	// offset to the desired rune.  TODO(hanwen): disable the
+	// mapping if the index shard is 100% lo-bit ascii.
+	runeOffsets []uint32
+	runeCount   uint32
+	end         uint32 // in bytes
 }
 
-func newSearchableString(data []byte, startOff uint32, postings map[ngram][]byte,
-	lastOffsets map[ngram]uint32) *searchableString {
+func newPostingsBuilder() *postingsBuilder {
+	return &postingsBuilder{
+		postings:    map[ngram][]byte{},
+		lastOffsets: map[ngram]uint32{},
+	}
+}
+
+func (s *postingsBuilder) newSearchableString(data []byte) *searchableString {
 	dest := searchableString{
-		offset: startOff,
-		data:   data,
+		data: data,
 	}
 	var buf [8]byte
-	for i := range dest.data {
-		if i+ngramSize > len(dest.data) {
-			break
+	var runeGram [3]rune
+	var off [3]uint32 // byte offsets relative to start of data.
+
+	rune := 0
+	for i, c := range string(dest.data) {
+		runeGram[0] = runeGram[1]
+		off[0] = off[1]
+		runeGram[1] = runeGram[2]
+		off[1] = off[2]
+		runeGram[2] = c
+		off[2] = uint32(i)
+		rune++
+
+		s.runeCount++
+		if idx := s.runeCount - 1; idx%runeOffsetFrequency == 0 {
+			s.runeOffsets = append(s.runeOffsets, s.end+uint32(i))
 		}
-		ngram := bytesToNGram(dest.data[i : i+ngramSize])
-		lastOff := lastOffsets[ngram]
-		newOff := startOff + uint32(i)
+
+		if rune < ngramSize {
+			continue
+		}
+
+		ng := runesToNGram(runeGram)
+		lastOff := s.lastOffsets[ng]
+		newOff := s.end + off[0]
 		m := binary.PutUvarint(buf[:], uint64(newOff-lastOff))
-		postings[ngram] = append(postings[ngram], buf[:m]...)
-		lastOffsets[ngram] = newOff
+		s.postings[ng] = append(s.postings[ng], buf[:m]...)
+		s.lastOffsets[ng] = newOff
 	}
+
+	s.end += uint32(len(data))
+
 	return &dest
 }
 
@@ -72,13 +108,8 @@ type IndexBuilder struct {
 	branchMasks []uint32
 	subRepos    []uint32
 
-	// ngram => posting.
-	contentPostings    map[ngram][]byte
-	contentLastOffsets map[ngram]uint32
-
-	// like postings, but for filenames
-	namePostings    map[ngram][]byte
-	nameLastOffsets map[ngram]uint32
+	contents *postingsBuilder
+	names    *postingsBuilder
 
 	// root repository
 	repo Repository
@@ -107,10 +138,8 @@ func (b *IndexBuilder) ContentSize() uint32 {
 // Repository contains repo metadata, and may be set to nil.
 func NewIndexBuilder(r *Repository) (*IndexBuilder, error) {
 	b := &IndexBuilder{
-		contentPostings:    make(map[ngram][]byte),
-		namePostings:       make(map[ngram][]byte),
-		contentLastOffsets: make(map[ngram]uint32),
-		nameLastOffsets:    make(map[ngram]uint32),
+		contents: newPostingsBuilder(),
+		names:    newPostingsBuilder(),
 	}
 
 	if r == nil {
@@ -122,8 +151,6 @@ func NewIndexBuilder(r *Repository) (*IndexBuilder, error) {
 	return b, nil
 }
 
-// setRepository adds repository metadata. The Branches field is
-// ignored.
 func (b *IndexBuilder) setRepository(desc *Repository) error {
 	if len(b.files) > 0 {
 		return fmt.Errorf("AddSubRepository called after adding files.")
@@ -270,12 +297,10 @@ func (b *IndexBuilder) Add(doc Document) error {
 
 	b.subRepos = append(b.subRepos, subRepoIdx)
 
-	b.files = append(b.files, newSearchableString(doc.Content, b.contentEnd, b.contentPostings, b.contentLastOffsets))
-	b.fileNames = append(b.fileNames, newSearchableString([]byte(doc.Name), b.nameEnd, b.namePostings, b.nameLastOffsets))
+	b.files = append(b.files, b.contents.newSearchableString(doc.Content))
+	b.fileNames = append(b.fileNames, b.names.newSearchableString([]byte(doc.Name)))
 
 	b.docSections = append(b.docSections, doc.Symbols)
-	b.contentEnd += uint32(len(doc.Content))
-	b.nameEnd += uint32(len(doc.Name))
 
 	b.branchMasks = append(b.branchMasks, mask)
 	return nil

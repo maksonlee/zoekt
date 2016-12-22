@@ -16,6 +16,7 @@ package zoekt
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"log"
@@ -29,10 +30,12 @@ import (
 // 6: remove size prefix for posting varint list.
 // 7: move subrepos into Repository struct.
 // 8: move repoMetaData out of indexMetadata
+// 9: use bigendian uint64 for trigrams.
+// 10: sections for rune offsets.
 const IndexFormatVersion = 8
 
 // FeatureVersion is increased if a feature is added that requires reindexing data.
-const FeatureVersion = 2
+const FeatureVersion = 0
 
 var _ = log.Println
 
@@ -43,14 +46,16 @@ type indexTOC struct {
 	postings     compoundSection
 	newlines     compoundSection
 	ngramText    simpleSection
+	runeOffsets  simpleSection
 
 	branchMasks simpleSection
 	subRepos    simpleSection
 
-	nameNgramText simpleSection
-	namePostings  compoundSection
-	metaData      simpleSection
-	repoMetaData  simpleSection
+	nameNgramText   simpleSection
+	namePostings    compoundSection
+	nameRuneOffsets simpleSection
+	metaData        simpleSection
+	repoMetaData    simpleSection
 }
 
 func (t *indexTOC) sections() []section {
@@ -69,6 +74,8 @@ func (t *indexTOC) sections() []section {
 		&t.namePostings,
 		&t.branchMasks,
 		&t.subRepos,
+		&t.runeOffsets,
+		&t.nameRuneOffsets,
 	}
 }
 
@@ -86,6 +93,34 @@ func (s *compoundSection) writeStrings(w *writer, strs []*searchableString) {
 		s.addItem(w, f.data)
 	}
 	s.end(w)
+}
+
+func writePostings(w *writer, s *postingsBuilder, ngramText *simpleSection,
+	charOffsets *simpleSection,
+	postings *compoundSection) {
+	var keys ngramSlice
+	for k := range s.postings {
+		keys = append(keys, k)
+	}
+	sort.Sort(keys)
+
+	ngramText.start(w)
+	for _, k := range keys {
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], uint64(k))
+		w.Write(buf[:])
+	}
+	ngramText.end(w)
+
+	postings.start(w)
+	for _, k := range keys {
+		postings.addItem(w, s.postings[k])
+	}
+	postings.end(w)
+
+	charOffsets.start(w)
+	w.Write(toSizedDeltas(s.runeOffsets))
+	charOffsets.end(w)
 }
 
 func (b *IndexBuilder) Write(out io.Writer) error {
@@ -115,44 +150,12 @@ func (b *IndexBuilder) Write(out io.Writer) error {
 	}
 	toc.fileSections.end(w)
 
-	var keys []string
-	for k := range b.contentPostings {
-		keys = append(keys, k.String())
-	}
-	sort.Strings(keys)
-
-	toc.ngramText.start(w)
-	for _, k := range keys {
-		w.Write([]byte(k))
-	}
-	toc.ngramText.end(w)
-
-	toc.postings.start(w)
-	for _, k := range keys {
-		toc.postings.addItem(w, b.contentPostings[stringToNGram(k)])
-	}
-	toc.postings.end(w)
+	writePostings(w, b.contents, &toc.ngramText, &toc.runeOffsets, &toc.postings)
 
 	// names.
 	toc.fileNames.writeStrings(w, b.fileNames)
 
-	keys = keys[:0]
-	for k := range b.namePostings {
-		keys = append(keys, k.String())
-	}
-	sort.Strings(keys)
-
-	toc.nameNgramText.start(w)
-	for _, k := range keys {
-		w.Write([]byte(k))
-	}
-	toc.nameNgramText.end(w)
-
-	toc.namePostings.start(w)
-	for _, k := range keys {
-		toc.namePostings.addItem(w, b.namePostings[stringToNGram(k)])
-	}
-	toc.namePostings.end(w)
+	writePostings(w, b.names, &toc.nameNgramText, &toc.nameRuneOffsets, &toc.namePostings)
 
 	toc.subRepos.start(w)
 	w.Write(toSizedDeltas(b.subRepos))
